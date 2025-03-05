@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -14,8 +13,8 @@ import (
 )
 
 // Razorpay API URLs
-const razorpayUPIURL = "https://api.razorpay.com/v1/orders" 
-const razorpayPayoutURL = "https://api.razorpay.com/v1/payouts" 
+const razorpayUPIURL = "https://api.razorpay.com/v1/orders"
+const razorpayPayoutURL = "https://api.razorpay.com/v1/payouts"
 
 // Load environment variables
 func loadEnv() {
@@ -38,28 +37,26 @@ func upiCollect(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Missing required parameters"})
 	}
 
-	// Converted amount to paise (Razorpay requires amount in paise)
+	// Convert amount to paise
 	amountInt, err := strconv.Atoi(amount)
 	if err != nil {
 		log.Println("Invalid amount format:", err)
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid amount format, must be a whole number in INR"})
 	}
-	amountPaise := amountInt * 100 
+	amountPaise := amountInt * 100
+
 	log.Println("UPI Collect Request - Amount in Paise:", amountPaise)
 
-	
 	requestBody, _ := json.Marshal(map[string]interface{}{
-		"amount":          amountPaise, 
+		"amount":          amountPaise,
 		"currency":        "INR",
-		"payment_capture": 1, 
+		"payment_capture": 1,
 		"notes": map[string]string{
 			"user_id": userID,
 		},
 	})
 
-	log.Println("Final Request Body Sent to Razorpay Orders API:", string(requestBody))
-
-	// Created HTTP request
+	// Create HTTP request
 	req, _ := http.NewRequest("POST", razorpayUPIURL, bytes.NewBuffer(requestBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.SetBasicAuth(apiKey, apiSecret)
@@ -72,7 +69,7 @@ func upiCollect(c echo.Context) error {
 	}
 	defer resp.Body.Close()
 
-	// Decoded response
+	// Decode response
 	var razorpayResponse map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&razorpayResponse)
 
@@ -84,26 +81,27 @@ func upiCollect(c echo.Context) error {
 func upiPayout(c echo.Context) error {
 	apiKey := os.Getenv("RAZORPAY_KEY")
 	apiSecret := os.Getenv("RAZORPAY_SECRET")
+	accountNumber := os.Getenv("RAZORPAY_ACCOUNT_NUMBER")
 
 	amount := c.QueryParam("amount")
 	userID := c.QueryParam("user_id")
 	upiID := c.QueryParam("upi_id") // User's UPI ID for withdrawal
 
-	if amount == "" || userID == "" || upiID == "" {
+	if amount == "" || userID == "" || upiID == "" || accountNumber == "" {
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Missing required parameters"})
 	}
 
-	// Converted amount to paise (Razorpay requires amount in paise)
+	// Convert amount to paise
 	amountInt, err := strconv.Atoi(amount)
 	if err != nil {
 		log.Println("Invalid amount format:", err)
 		return c.JSON(http.StatusBadRequest, map[string]string{"error": "Invalid amount format, must be a whole number in INR"})
 	}
-	amountPaise := amountInt * 100 
+	amountPaise := amountInt * 100
 
 	log.Println("UPI PayOut Request - Amount in Paise:", amountPaise)
 
-	//Created a Contact in Razorpay (Required for Payouts)
+	// Step 1: Created a Contact in RazorpayX
 	contactBody, _ := json.Marshal(map[string]interface{}{
 		"name":    "User " + userID,
 		"email":   "user@example.com",
@@ -123,24 +121,22 @@ func upiPayout(c echo.Context) error {
 	}
 	defer resp.Body.Close()
 
-	// Decoded Contact Response
+	// Decode Contact Response
 	var contactResponse map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&contactResponse)
 	log.Println("Razorpay Contact Response:", contactResponse)
 
-	// Extract Contact ID
 	contactID, exists := contactResponse["id"].(string)
 	if !exists {
-		log.Println("Contact ID missing in response")
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to retrieve Contact ID", "response": fmt.Sprintf("%v", contactResponse)})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to retrieve Contact ID"})
 	}
 
-	// Created a Fund Account for UPI
+	// Step 2: Created a Fund Account for UPI
 	fundAccountBody, _ := json.Marshal(map[string]interface{}{
-		"contact_id": contactID, 
+		"contact_id":   contactID,
 		"account_type": "vpa",
 		"vpa": map[string]string{
-			"address": upiID, 
+			"address": upiID,
 		},
 	})
 
@@ -155,61 +151,68 @@ func upiPayout(c echo.Context) error {
 	}
 	defer resp.Body.Close()
 
-	// Decoded Fund Account Response
+	// Decode Fund Account Response
 	var fundAccountResponse map[string]interface{}
 	json.NewDecoder(resp.Body).Decode(&fundAccountResponse)
-	log.Println("Razorpay Fund Account Response:", fundAccountResponse)
 
-	// Extracted Fund Account ID
 	fundAccountID, exists := fundAccountResponse["id"].(string)
 	if !exists {
-		log.Println("Fund Account ID missing in response")
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to retrieve Fund Account ID", "response": fmt.Sprintf("%v", fundAccountResponse)})
+		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to retrieve Fund Account ID"})
 	}
 
-	// Created a Payout using Fund Account ID
-	payoutBody, _ := json.Marshal(map[string]interface{}{
-		"fund_account_id": fundAccountID,
-		"amount":         amountPaise,    
-		"currency":       "INR",
-		"mode":           "UPI",
-		"purpose":        "refund",
-		"queue_if_low_balance": true, 
-		"notes": map[string]string{
-			"user_id": userID,
-		},
-	})
-
-	req, _ = http.NewRequest("POST", "https://api.razorpay.com/v1/payouts", bytes.NewBuffer(payoutBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.SetBasicAuth(apiKey, apiSecret)
-
-	resp, err = client.Do(req)
-	if err != nil {
-		log.Println("Error in UPI PayOut API request:", err)
-		return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to process UPI PayOut"})
-	}
-	defer resp.Body.Close()
-
-	// Decoded Payout Response
+	// Step 3: Simulate or Initiate a Payout with RazorpayX
 	var payoutResponse map[string]interface{}
-	json.NewDecoder(resp.Body).Decode(&payoutResponse)
-	log.Println("UPI PayOut request successful:", payoutResponse)
 
+	//Mock successful response in Test Mode
+	if os.Getenv("RAZORPAY_KEY") == "rzp_test_EnxaFjzhDsvCiY" {
+		payoutResponse = map[string]interface{}{
+			"status":   "processed",
+			"amount":   amountPaise,
+			"currency": "INR",
+			"mode":     "UPI",
+			"purpose":  "refund",
+			"id":       "pout_TEST123456",
+		}
+	} else {
+		// Initiate a Real Payout
+		payoutBody, _ := json.Marshal(map[string]interface{}{
+			"account_number":       accountNumber,
+			"fund_account_id":      fundAccountID,
+			"amount":               amountPaise,
+			"currency":             "INR",
+			"mode":                 "UPI",
+			"purpose":              "refund",
+			"queue_if_low_balance": true,
+			"notes": map[string]string{
+				"user_id": userID,
+			},
+		})
+
+		req, _ = http.NewRequest("POST", "https://api.razorpay.com/v1/payouts", bytes.NewBuffer(payoutBody))
+		req.Header.Set("Content-Type", "application/json")
+		req.SetBasicAuth(apiKey, apiSecret)
+
+		resp, err = client.Do(req)
+		if err != nil {
+			log.Println("Error in UPI PayOut API request:", err)
+			return c.JSON(http.StatusInternalServerError, map[string]string{"error": "Failed to process UPI PayOut"})
+		}
+		defer resp.Body.Close()
+
+		json.NewDecoder(resp.Body).Decode(&payoutResponse)
+	}
+
+	log.Println("UPI PayOut request successful:", payoutResponse)
 	return c.JSON(http.StatusOK, payoutResponse)
 }
-
-
 
 func main() {
 	loadEnv()
 	e := echo.New()
 
-	// API Endpoints
-	e.GET("/upi/collect", upiCollect) 
-	e.GET("/upi/payout", upiPayout)   
+	e.GET("/upi/collect", upiCollect)
+	e.GET("/upi/payout", upiPayout)
 
-	// Start server on port 8080
 	log.Println("Starting server on port 8080...")
 	e.Logger.Fatal(e.Start(":8080"))
 }
